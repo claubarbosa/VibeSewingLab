@@ -757,12 +757,45 @@ def build_app():
                 "LLM is not available. Configure VIBE_LLM_PROVIDER/VIBE_LLM_MODEL and required credentials."
             )
 
+    def text_error_outputs(message: str):
+        msg = str(message).strip() or "Unknown error"
+        error_json = json.dumps({"error": msg}, ensure_ascii=False, indent=2)
+        return (
+            pd.DataFrame([{"error": msg}]),
+            {"error": msg},
+            pd.DataFrame([{"error": msg}]),
+            pd.DataFrame([{"error": msg}]),
+            msg,
+            msg,
+            msg,
+            f"- {msg}",
+            error_json,
+        )
+
+    def image_error_outputs(message: str):
+        msg = str(message).strip() or "Unknown error"
+        error_json = json.dumps({"error": msg}, ensure_ascii=False, indent=2)
+        return (
+            {"error": msg},
+            pd.DataFrame([{"error": msg}]),
+            pd.DataFrame([{"error": msg}]),
+            msg,
+            msg,
+            f"- {msg}",
+            None,
+            error_json,
+        )
+
     def run_text_pipeline(title: str, description: str):
-        ensure_runtime_ready()
+        try:
+            ensure_runtime_ready()
+        except Exception as exc:
+            return text_error_outputs(f"Runtime is not ready: {exc}")
+
         if not title or not title.strip():
-            raise gr.Error("Project name is required.")
+            return text_error_outputs("Project name is required.")
         if not description or not description.strip():
-            raise gr.Error("Project description is required.")
+            return text_error_outputs("Project description is required.")
 
         try:
             project = orchestrator.create_project_from_text(title.strip(), description.strip())
@@ -795,12 +828,16 @@ def build_app():
             )
         except Exception as exc:
             print("[run_text_pipeline]", traceback.format_exc())
-            raise gr.Error(f"Failed to generate text project: {exc}")
+            return text_error_outputs(f"Failed to generate text project: {exc}")
 
     def run_image_pipeline(title: str, description: str, image):
-        ensure_runtime_ready()
+        try:
+            ensure_runtime_ready()
+        except Exception as exc:
+            return image_error_outputs(f"Runtime is not ready: {exc}")
+
         if image is None:
-            raise gr.Error("Image is required.")
+            return image_error_outputs("Image is required.")
 
         try:
             clean_title = (title or "Image Project").strip()
@@ -838,7 +875,7 @@ def build_app():
             )
         except Exception as exc:
             print("[run_image_pipeline]", traceback.format_exc())
-            raise gr.Error(f"Failed to generate image project: {exc}")
+            return image_error_outputs(f"Failed to generate image project: {exc}")
 
     def run_rag_pipeline(knowledge_text: str, question: str):
         ensure_runtime_ready()
