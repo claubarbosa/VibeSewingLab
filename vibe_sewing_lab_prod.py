@@ -800,11 +800,11 @@ def build_app():
 
 **AI-powered Creative Sewing Assistant**
 
-Vibe Sewing Lab is an intelligent creative assistant for artisan sewing professionals, especially makers who design handmade bags.
+O Vibe Sewing Lab é um assistente criativo inteligente desenvolvido para profissionais da costura artesanal, especialmente para artesãs e criadores que confeccionam bolsas feitas à mão.
 
-It does not replace human creativity.
+Ele não substitui a criatividade humana.
 
-It amplifies it.
+Ele a potencializa.
             """
         )
         gr.Markdown(llm_status)
