@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import traceback
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -247,6 +248,26 @@ class IdeaGeneratorService:
     def __init__(self, llm_provider: BaseLLMProvider):
         self.llm_provider = llm_provider
 
+    def _fallback_concepts(self, user_prompt: str, count: int) -> List[Dict[str, str]]:
+        prompt = re.sub(r"\s+", " ", user_prompt).strip()
+        prompt_summary = (prompt[:90] + "...") if len(prompt) > 90 else prompt
+        if not prompt_summary:
+            prompt_summary = "handmade bag project"
+
+        concepts: List[Dict[str, str]] = []
+        for index in range(count):
+            concepts.append(
+                {
+                    "name": f"Concept {index + 1}",
+                    "target_audience": prompt_summary,
+                    "aesthetic": "artisan contemporary",
+                    "suggested_materials": "Main fabric, lining, interfacing, zipper, reinforced handles",
+                    "differential": "Balanced handmade look with practical organization",
+                    "difficulty": "medium",
+                }
+            )
+        return concepts
+
     def _extract_json_array(self, text: str):
         try:
             parsed = json.loads(text)
@@ -287,10 +308,14 @@ Return only JSON with this schema:
   }}
 ]
 """
-        raw = self.llm_provider.generate(prompt)
-        parsed = self._extract_json_array(raw)
+        try:
+            raw = self.llm_provider.generate(prompt)
+            parsed = self._extract_json_array(raw)
+        except Exception:
+            parsed = None
+
         if not isinstance(parsed, list) or not parsed:
-            raise ValueError("LLM did not return valid JSON for concepts.")
+            return self._fallback_concepts(user_prompt, count)
 
         concepts: List[Dict[str, str]] = []
         for item in parsed[:count]:
@@ -309,7 +334,7 @@ Return only JSON with this schema:
 
         concepts = [c for c in concepts if c["name"] and c["target_audience"]]
         if not concepts:
-            raise ValueError("Concept list is empty after JSON parse.")
+            return self._fallback_concepts(user_prompt, count)
         return concepts
 
 
@@ -415,6 +440,33 @@ class CreativeStudioService:
     def __init__(self, llm_provider: BaseLLMProvider):
         self.llm_provider = llm_provider
 
+    def _fallback_brand_assets(self, project: SewingProject) -> Dict[str, str]:
+        title = (project.title or "Vibe Sewing Collection").strip()
+        description = (project.description or "Handmade bag concept.").strip()
+        analysis = project.image_analysis or {}
+        difficulty = str(analysis.get("difficulty", "medium")).strip().lower()
+
+        story = (
+            f"{title} is a handmade bag concept designed to combine craftsmanship, functionality, and a clear visual identity. "
+            f"The project description highlights: {description}"
+        )
+
+        return {
+            "collection_name": title,
+            "story": story,
+            "description": description,
+            "slogan": "Handmade with character.",
+            "instagram": f"Introducing {title}: a {difficulty} handmade bag concept built for everyday use and a strong artisan presence.",
+            "linkedin": f"{title} showcases a structured handmade product concept with clear design intent and production readiness.",
+            "facebook": f"Meet {title}, a new handmade bag idea focused on utility, style, and craft.",
+            "pinterest": f"{title} moodboard: artisan textures, functional structure, and contemporary handmade bag styling.",
+            "etsy": f"{title} is a handmade bag concept with thoughtful materials, practical construction, and an artisan finish.",
+            "shopee": f"{title} brings a polished handmade aesthetic with practical everyday performance.",
+            "marketplace": f"{title} is positioned as a handmade bag product for customers who value craft, structure, and uniqueness.",
+            "image_prompt": f"Studio product shot of {title}, handmade bag concept, artisan contemporary styling, neutral background, detailed stitching, realistic materials.",
+            "video_prompt": f"Short promotional video of {title}, showing the handmade bag from multiple angles, stitching details, hardware, and practical use cases.",
+        }
+
     def _extract_json_object(self, text: str):
         try:
             parsed = json.loads(text)
@@ -446,8 +498,11 @@ Analysis: {project.image_analysis}
 Return JSON object with keys:
 collection_name, story, description, slogan, instagram, linkedin, facebook, pinterest, etsy, shopee, marketplace, image_prompt, video_prompt
 """
-        raw = self.llm_provider.generate(prompt)
-        parsed = self._extract_json_object(raw)
+        try:
+            raw = self.llm_provider.generate(prompt)
+            parsed = self._extract_json_object(raw)
+        except Exception:
+            parsed = None
 
         required = [
             "collection_name",
@@ -466,11 +521,11 @@ collection_name, story, description, slogan, instagram, linkedin, facebook, pint
         ]
 
         if not isinstance(parsed, dict):
-            raise ValueError("LLM did not return valid JSON for creative assets.")
+            return self._fallback_brand_assets(project)
 
         missing = [k for k in required if not str(parsed.get(k, "")).strip()]
         if missing:
-            raise ValueError(f"Creative assets missing keys: {missing}")
+            return self._fallback_brand_assets(project)
 
         return {k: str(parsed[k]).strip() for k in required}
 
@@ -709,72 +764,81 @@ def build_app():
         if not description or not description.strip():
             raise gr.Error("Project description is required.")
 
-        project = orchestrator.create_project_from_text(title.strip(), description.strip())
-        materials_df = pd.DataFrame(
-            [
-                {
-                    "name": item.name,
-                    "category": item.category,
-                    "quantity": item.quantity,
-                    "unit": item.unit,
-                    "unit_cost": item.estimated_unit_cost,
-                    "subtotal": item.subtotal,
-                }
-                for item in project.materials
-            ]
-        )
+        try:
+            project = orchestrator.create_project_from_text(title.strip(), description.strip())
+            materials_df = pd.DataFrame(
+                [
+                    {
+                        "name": item.name,
+                        "category": item.category,
+                        "quantity": item.quantity,
+                        "unit": item.unit,
+                        "unit_cost": item.estimated_unit_cost,
+                        "subtotal": item.subtotal,
+                    }
+                    for item in project.materials
+                ]
+            )
 
-        checklist = "\n".join([f"- {item}" for item in project.production_plan["checklist"]])
+            checklist = "\n".join([f"- {item}" for item in project.production_plan["checklist"]])
 
-        return (
-            pd.DataFrame(project.concepts),
-            project.image_analysis,
-            materials_df,
-            pd.DataFrame([project.costing]),
-            project.creative_assets["story"],
-            project.creative_assets["instagram"],
-            project.creative_assets["linkedin"],
-            checklist,
-            project.to_json(),
-        )
+            return (
+                pd.DataFrame(project.concepts),
+                project.image_analysis,
+                materials_df,
+                pd.DataFrame([project.costing]),
+                project.creative_assets["story"],
+                project.creative_assets["instagram"],
+                project.creative_assets["linkedin"],
+                checklist,
+                project.to_json(),
+            )
+        except Exception as exc:
+            print("[run_text_pipeline]", traceback.format_exc())
+            raise gr.Error(f"Failed to generate text project: {exc}")
 
     def run_image_pipeline(title: str, description: str, image):
         ensure_runtime_ready()
         if image is None:
             raise gr.Error("Image is required.")
 
-        clean_title = (title or "Image Project").strip()
-        clean_desc = (description or "").strip()
-        pil_image = Image.fromarray(image.astype("uint8"))
+        try:
+            clean_title = (title or "Image Project").strip()
+            clean_desc = (description or "").strip()
+            image_array = np.asarray(image)
+            pil_image = Image.fromarray(np.clip(image_array, 0, 255).astype("uint8"))
 
-        project = orchestrator.create_project_from_image(clean_title, clean_desc, pil_image)
-        materials_df = pd.DataFrame(
-            [
-                {
-                    "name": item.name,
-                    "category": item.category,
-                    "quantity": item.quantity,
-                    "unit": item.unit,
-                    "unit_cost": item.estimated_unit_cost,
-                    "subtotal": item.subtotal,
-                }
-                for item in project.materials
-            ]
-        )
+            project = orchestrator.create_project_from_image(clean_title, clean_desc, pil_image)
+            materials_df = pd.DataFrame(
+                [
+                    {
+                        "name": item.name,
+                        "category": item.category,
+                        "quantity": item.quantity,
+                        "unit": item.unit,
+                        "unit_cost": item.estimated_unit_cost,
+                        "subtotal": item.subtotal,
+                    }
+                    for item in project.materials
+                ]
+            )
 
-        fig = orchestrator.sketch_service.generate_sketch_views(project.title)
-        checklist = "\n".join([f"- {item}" for item in project.production_plan["checklist"]])
+            fig = orchestrator.sketch_service.generate_sketch_views(project.title)
+            checklist = "\n".join([f"- {item}" for item in project.production_plan["checklist"]])
 
-        return (
-            project.image_analysis,
-            materials_df,
-            pd.DataFrame([project.costing]),
-            project.creative_assets["description"],
-            project.creative_assets["image_prompt"],
-            checklist,
-            fig,
-            project.to_json(),
-        )
+            return (
+                project.image_analysis,
+                materials_df,
+                pd.DataFrame([project.costing]),
+                project.creative_assets["description"],
+                project.creative_assets["image_prompt"],
+                checklist,
+                fig,
+                project.to_json(),
+            )
+        except Exception as exc:
+            print("[run_image_pipeline]", traceback.format_exc())
+            raise gr.Error(f"Failed to generate image project: {exc}")
 
     def run_rag_pipeline(knowledge_text: str, question: str):
         ensure_runtime_ready()
@@ -783,10 +847,14 @@ def build_app():
         if not question or not question.strip():
             raise gr.Error("Question is required.")
 
-        rag_service.ingest_long_text(knowledge_text)
-        result = rag_service.answer_with_context(question=question.strip(), llm_provider=llm, top_k=3)
-        contexts_md = "\n\n".join([f"- {c}" for c in result["contexts"]])
-        return result["answer"], contexts_md
+        try:
+            rag_service.ingest_long_text(knowledge_text)
+            result = rag_service.answer_with_context(question=question.strip(), llm_provider=llm, top_k=3)
+            contexts_md = "\n\n".join([f"- {c}" for c in result["contexts"]])
+            return result["answer"], contexts_md
+        except Exception as exc:
+            print("[run_rag_pipeline]", traceback.format_exc())
+            raise gr.Error(f"Failed to run technical assistant: {exc}")
 
     def refresh_dashboard():
         df = build_dashboard_data(repo)
@@ -800,11 +868,11 @@ def build_app():
 
 **AI-powered Creative Sewing Assistant**
 
-O Vibe Sewing Lab é um assistente criativo inteligente desenvolvido para profissionais da costura artesanal, especialmente para artesãs e criadores que confeccionam bolsas feitas à mão.
+Vibe Sewing Lab is an intelligent creative assistant for artisan sewing professionals, especially makers who design handmade bags.
 
-Ele não substitui a criatividade humana.
+It does not replace human creativity.
 
-Ele a potencializa.
+It amplifies it.
             """
         )
         gr.Markdown(llm_status)
