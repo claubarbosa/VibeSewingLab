@@ -212,9 +212,27 @@ class LocalTransformersLLMProvider(BaseLLMProvider):
             repetition_penalty=1.05,
         )
         if isinstance(result, list) and result:
-            text = str(result[0].get("generated_text", ""))
-            if text:
-                return text
+            generated = result[0].get("generated_text", "")
+            # Newer transformers (chat/instruct models) return a list of message dicts
+            if isinstance(generated, list):
+                for msg in reversed(generated):
+                    if isinstance(msg, dict) and msg.get("role") == "assistant":
+                        text = str(msg.get("content", "")).strip()
+                        if text:
+                            return text
+                # Fallback: join all content fields
+                text = " ".join(
+                    str(m.get("content", "")) for m in generated if isinstance(m, dict)
+                ).strip()
+                if text:
+                    return text
+            else:
+                text = str(generated).strip()
+                # Strip echoed prompt prefix (old transformers text-generation behaviour)
+                if text.startswith(prompt):
+                    text = text[len(prompt):].strip()
+                if text:
+                    return text
         raise LLMProviderError("Transformers model returned an empty response.")
 
 
@@ -737,7 +755,14 @@ def build_app():
 
     db_path = project_root / "data" / "projects.db"
     repo = SQLiteProjectRepository(db_path=db_path)
-    rag_service = SimpleRAGService()
+
+    # Lazy RAG: only load the SentenceTransformer when the user actually uses the RAG tab
+    _rag_service_cache: list = []
+
+    def _get_rag_service() -> SimpleRAGService:
+        if not _rag_service_cache:
+            _rag_service_cache.append(SimpleRAGService())
+        return _rag_service_cache[0]
 
     provider_name = os.getenv("VIBE_LLM_PROVIDER", "auto")
     model_name = os.getenv("VIBE_LLM_MODEL", "")
@@ -757,10 +782,12 @@ def build_app():
                 "LLM is not available. Configure VIBE_LLM_PROVIDER/VIBE_LLM_MODEL and required credentials."
             )
 
-    def text_error_outputs(message: str):
+    def text_error_outputs(message: str, tb: str = ""):
         msg = str(message).strip() or "Unknown error"
+        detail = f"{msg}\n\n{tb}".strip() if tb else msg
         error_json = json.dumps({"error": msg}, ensure_ascii=False, indent=2)
         return (
+            detail,
             pd.DataFrame([{"error": msg}]),
             {"error": msg},
             pd.DataFrame([{"error": msg}]),
@@ -772,10 +799,12 @@ def build_app():
             error_json,
         )
 
-    def image_error_outputs(message: str):
+    def image_error_outputs(message: str, tb: str = ""):
         msg = str(message).strip() or "Unknown error"
+        detail = f"{msg}\n\n{tb}".strip() if tb else msg
         error_json = json.dumps({"error": msg}, ensure_ascii=False, indent=2)
         return (
+            detail,
             {"error": msg},
             pd.DataFrame([{"error": msg}]),
             pd.DataFrame([{"error": msg}]),
@@ -790,23 +819,25 @@ def build_app():
         try:
             ensure_runtime_ready()
         except Exception as exc:
-            return text_error_outputs(f"Runtime is not ready: {exc}")
+            tb = traceback.format_exc()
+            print("[run_text_pipeline/runtime]", tb)
+            return text_error_outputs(f"Runtime indisponivel: {exc}", tb)
 
         if not title or not title.strip():
-            return text_error_outputs("Project name is required.")
+            return text_error_outputs("Informe o nome do projeto.")
         if not description or not description.strip():
-            return text_error_outputs("Project description is required.")
+            return text_error_outputs("Descreva sua ideia para gerar conceitos.")
 
         try:
             project = orchestrator.create_project_from_text(title.strip(), description.strip())
             materials_df = pd.DataFrame(
                 [
                     {
-                        "name": item.name,
-                        "category": item.category,
-                        "quantity": item.quantity,
-                        "unit": item.unit,
-                        "unit_cost": item.estimated_unit_cost,
+                        "nome": item.name,
+                        "categoria": item.category,
+                        "quantidade": item.quantity,
+                        "unidade": item.unit,
+                        "custo_unitario": item.estimated_unit_cost,
                         "subtotal": item.subtotal,
                     }
                     for item in project.materials
@@ -816,6 +847,7 @@ def build_app():
             checklist = "\n".join([f"- {item}" for item in project.production_plan["checklist"]])
 
             return (
+                "Projeto gerado com sucesso!",
                 pd.DataFrame(project.concepts),
                 project.image_analysis,
                 materials_df,
@@ -827,20 +859,23 @@ def build_app():
                 project.to_json(),
             )
         except Exception as exc:
-            print("[run_text_pipeline]", traceback.format_exc())
-            return text_error_outputs(f"Failed to generate text project: {exc}")
+            tb = traceback.format_exc()
+            print("[run_text_pipeline]", tb)
+            return text_error_outputs(f"Falha ao gerar projeto: {exc}", tb)
 
     def run_image_pipeline(title: str, description: str, image):
         try:
             ensure_runtime_ready()
         except Exception as exc:
-            return image_error_outputs(f"Runtime is not ready: {exc}")
+            tb = traceback.format_exc()
+            print("[run_image_pipeline/runtime]", tb)
+            return image_error_outputs(f"Runtime indisponivel: {exc}", tb)
 
         if image is None:
-            return image_error_outputs("Image is required.")
+            return image_error_outputs("Envie uma imagem para analise.")
 
         try:
-            clean_title = (title or "Image Project").strip()
+            clean_title = (title or "Projeto por imagem").strip()
             clean_desc = (description or "").strip()
             image_array = np.asarray(image)
             pil_image = Image.fromarray(np.clip(image_array, 0, 255).astype("uint8"))
@@ -849,11 +884,11 @@ def build_app():
             materials_df = pd.DataFrame(
                 [
                     {
-                        "name": item.name,
-                        "category": item.category,
-                        "quantity": item.quantity,
-                        "unit": item.unit,
-                        "unit_cost": item.estimated_unit_cost,
+                        "nome": item.name,
+                        "categoria": item.category,
+                        "quantidade": item.quantity,
+                        "unidade": item.unit,
+                        "custo_unitario": item.estimated_unit_cost,
                         "subtotal": item.subtotal,
                     }
                     for item in project.materials
@@ -864,6 +899,7 @@ def build_app():
             checklist = "\n".join([f"- {item}" for item in project.production_plan["checklist"]])
 
             return (
+                "Projeto gerado com sucesso!",
                 project.image_analysis,
                 materials_df,
                 pd.DataFrame([project.costing]),
@@ -874,24 +910,31 @@ def build_app():
                 project.to_json(),
             )
         except Exception as exc:
-            print("[run_image_pipeline]", traceback.format_exc())
-            return image_error_outputs(f"Failed to generate image project: {exc}")
+            tb = traceback.format_exc()
+            print("[run_image_pipeline]", tb)
+            return image_error_outputs(f"Falha ao gerar projeto por imagem: {exc}", tb)
 
     def run_rag_pipeline(knowledge_text: str, question: str):
-        ensure_runtime_ready()
+        try:
+            ensure_runtime_ready()
+        except Exception as exc:
+            return f"Runtime indisponivel: {exc}", ""
+
         if not knowledge_text or not knowledge_text.strip():
-            raise gr.Error("Knowledge text is required.")
+            return "Informe um texto tecnico para criar a base RAG.", ""
         if not question or not question.strip():
-            raise gr.Error("Question is required.")
+            return "Informe uma pergunta tecnica.", ""
 
         try:
-            rag_service.ingest_long_text(knowledge_text)
-            result = rag_service.answer_with_context(question=question.strip(), llm_provider=llm, top_k=3)
+            svc = _get_rag_service()
+            svc.ingest_long_text(knowledge_text)
+            result = svc.answer_with_context(question=question.strip(), llm_provider=llm, top_k=3)
             contexts_md = "\n\n".join([f"- {c}" for c in result["contexts"]])
             return result["answer"], contexts_md
         except Exception as exc:
-            print("[run_rag_pipeline]", traceback.format_exc())
-            raise gr.Error(f"Failed to run technical assistant: {exc}")
+            tb = traceback.format_exc()
+            print("[run_rag_pipeline]", tb)
+            return f"Falha no assistente tecnico: {exc}\n\n{tb}", ""
 
     def refresh_dashboard():
         df = build_dashboard_data(repo)
@@ -920,6 +963,12 @@ It amplifies it.
                 description_input = gr.Textbox(label="Project Description", lines=5)
                 text_button = gr.Button("Generate Full Project", variant="primary")
 
+                text_status_output = gr.Textbox(
+                    label="Status / Erro",
+                    lines=6,
+                    interactive=False,
+                    show_copy_button=True,
+                )
                 concepts_output = gr.Dataframe(label="Generated Concepts")
                 analysis_output = gr.JSON(label="Visual Analysis")
                 materials_output = gr.Dataframe(label="Material Plan")
@@ -934,6 +983,7 @@ It amplifies it.
                     fn=run_text_pipeline,
                     inputs=[title_input, description_input],
                     outputs=[
+                        text_status_output,
                         concepts_output,
                         analysis_output,
                         materials_output,
@@ -952,6 +1002,12 @@ It amplifies it.
                 image_input = gr.Image(label="Upload Image", type="numpy")
                 image_button = gr.Button("Analyze Image and Generate", variant="primary")
 
+                image_status_output = gr.Textbox(
+                    label="Status / Erro",
+                    lines=6,
+                    interactive=False,
+                    show_copy_button=True,
+                )
                 image_analysis_output = gr.JSON(label="Analysis")
                 image_materials_output = gr.Dataframe(label="Materials")
                 image_costing_output = gr.Dataframe(label="Costing")
@@ -965,6 +1021,7 @@ It amplifies it.
                     fn=run_image_pipeline,
                     inputs=[image_title, image_description, image_input],
                     outputs=[
+                        image_status_output,
                         image_analysis_output,
                         image_materials_output,
                         image_costing_output,
@@ -995,12 +1052,13 @@ It amplifies it.
                 dash_chart = gr.Plot(label="Analytics")
                 dash_button.click(fn=refresh_dashboard, inputs=[], outputs=[dash_table, dash_chart])
 
+    demo.queue()
     return demo
 
 
 if __name__ == "__main__":
     app = build_app()
     try:
-        app.launch(share=True, debug=True)
+        app.launch(share=True, debug=True, show_error=True)
     except Exception:
-        app.launch(share=False, debug=True)
+        app.launch(share=False, debug=True, show_error=True)
